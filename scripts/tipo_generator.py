@@ -25,7 +25,7 @@ class TIPOTextGenerator:
         self.tokenizer = None
         self.model = None
         self.model_loaded = False
-        self.model_name = "KBlueLeaf/TIPO-200M"
+        self.model_name = "KBlueLeaf/DanTagGen-beta"
     
     def load_model(self):
         if not self.model_loaded:
