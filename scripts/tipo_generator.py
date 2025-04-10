@@ -17,6 +17,8 @@ except ImportError:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
+torch.set_num_threads(8)
+
 # Hide all CUDA devices to avoid mixed device errors
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -34,7 +36,11 @@ class TIPOTextGenerator:
                 # Load tokenizer
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
                 # Load model
-                self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch.float32,  # or torch.float16 if supported
+                    low_cpu_mem_usage=True
+                )
                 self.model_loaded = True
                 print("TIPO model loaded successfully!")
                 return True
