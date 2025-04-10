@@ -39,7 +39,6 @@ class TIPOTextGenerator:
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.model_name,
                     torch_dtype=torch.float32,  # or torch.float16 if supported
-                    low_cpu_mem_usage=True
                 )
                 self.model_loaded = True
                 print("TIPO model loaded successfully!")
