@@ -1,75 +1,46 @@
 import gradio as gr
 import modules.scripts as scripts
 from modules import script_callbacks
-from modules.processing import process_images, Processed
-from modules.shared import opts, cmd_opts, state
 import os
 import sys
-import json
 from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
-
-# Force CPU-only mode
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 # Check if the required libraries are installed
 try:
     import torch
-    torch.set_num_threads(4)  # Limit CPU threads to avoid memory issues
-    from transformers import pipeline
+    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 except ImportError:
     print("Required libraries not found. Installing...")
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers"])
     import torch
-    torch.set_num_threads(4)
-    from transformers import pipeline
+    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+# Hide all CUDA devices to avoid mixed device errors
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 class TIPOTextGenerator:
     def __init__(self):
-        self.pipe = None
+        self.tokenizer = None
+        self.model = None
         self.model_loaded = False
         self.model_name = "KBlueLeaf/TIPO-200M-ft2"
-        
+    
     def load_model(self):
         if not self.model_loaded:
             try:
-                print(f"Loading TIPO model: {self.model_name} on CPU")
-                # Load in 8-bit mode to reduce memory usage
-                self.pipe = pipeline(
-                    "text-generation", 
-                    model=self.model_name, 
-                    device="cpu",
-                    model_kwargs={"load_in_8bit": True}
-                )
+                print(f"Loading TIPO model: {self.model_name} on CPU (simple version)")
+                # Load tokenizer
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                # Load model
+                self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
                 self.model_loaded = True
-                print("TIPO model loaded successfully on CPU!")
+                print("TIPO model loaded successfully!")
                 return True
             except Exception as e:
                 print(f"Error loading model: {e}")
-                # Try alternate loading method if first fails
-                try:
-                    from transformers import AutoModelForCausalLM, AutoTokenizer
-                    print("Trying alternate loading method...")
-                    tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-                    model = AutoModelForCausalLM.from_pretrained(
-                        self.model_name,
-                        device_map="auto",
-                        torch_dtype=torch.float32,
-                        low_cpu_mem_usage=True
-                    )
-                    self.pipe = pipeline(
-                        "text-generation",
-                        model=model,
-                        tokenizer=tokenizer,
-                        device="cpu"
-                    )
-                    self.model_loaded = True
-                    print("TIPO model loaded successfully with alternate method!")
-                    return True
-                except Exception as e2:
-                    print(f"Error with alternate loading method: {e2}")
-                    return False
+                return False
         return True
     
     def generate_text(self, prompt, max_length=200, temperature=0.7, top_p=0.9, num_return_sequences=1):
@@ -77,18 +48,26 @@ class TIPOTextGenerator:
             return "Failed to load the model."
         
         try:
-            # Make sure we're using CPU for inference
-            with torch.no_grad():
-                outputs = self.pipe(
-                    prompt,
-                    max_length=max_length,
-                    temperature=temperature,
-                    top_p=top_p,
-                    num_return_sequences=num_return_sequences,
-                    do_sample=True
-                )
+            # Manual generation without pipeline
+            inputs = self.tokenizer(prompt, return_tensors="pt")
             
-            generated_texts = [output['generated_text'] for output in outputs]
+            # Set generation parameters
+            gen_kwargs = {
+                "max_length": max_length,
+                "do_sample": True,
+                "temperature": temperature,
+                "top_p": top_p,
+                "num_return_sequences": num_return_sequences,
+            }
+            
+            with torch.no_grad():
+                generated_ids = self.model.generate(**inputs, **gen_kwargs)
+            
+            generated_texts = [
+                self.tokenizer.decode(g, skip_special_tokens=True)
+                for g in generated_ids
+            ]
+            
             return generated_texts[0] if num_return_sequences == 1 else generated_texts
         
         except Exception as e:
@@ -100,27 +79,24 @@ class TIPOTextGenerator:
 # Global instance of the text generator
 text_generator = TIPOTextGenerator()
 
+# Create a simple script for the WebUI
 class TIPOScript(scripts.Script):
     def title(self):
-        return "TIPO Text Generator"
+        return "TIPO Text Generator (Simple)"
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
         with gr.Group():
-            with gr.Accordion("TIPO Text Generator Settings", open=False):
+            with gr.Accordion("TIPO Text Generator (Simple)", open=False):
                 enabled = gr.Checkbox(label="Enable TIPO Text Enhancement", value=False)
                 load_model = gr.Button(value="Load TIPO Model")
                 model_status = gr.Textbox(label="Model Status", value="Not loaded", interactive=False)
                 
-                temperature = gr.Slider(minimum=0.1, maximum=2.0, step=0.1, label="Temperature", value=0.7)
-                top_p = gr.Slider(minimum=0.1, maximum=1.0, step=0.05, label="Top P", value=0.9)
-                max_length = gr.Slider(minimum=50, maximum=500, step=10, label="Max Output Length", value=200)
-                
                 with gr.Row():
                     input_prompt = gr.Textbox(label="Input Prompt for Enhancement", lines=2)
-                    generate_button = gr.Button(value="Generate & Insert")
+                    generate_button = gr.Button(value="Generate Text")
                     
                 enhanced_prompt = gr.Textbox(label="Enhanced Prompt", lines=3, interactive=False)
         
@@ -133,90 +109,28 @@ class TIPOScript(scripts.Script):
             outputs=[model_status]
         )
         
-        def generate_enhanced_prompt(prompt, max_len, temp, p):
-            if not prompt:
-                return "Please provide an input prompt", prompt
-            
-            enhanced = text_generator.generate_text(
-                prompt=prompt,
-                max_length=max_len,
-                temperature=temp,
-                top_p=p
-            )
-            
-            return enhanced, enhanced
-        
-        generate_button.click(
-            fn=generate_enhanced_prompt,
-            inputs=[input_prompt, max_length, temperature, top_p],
-            outputs=[enhanced_prompt, input_prompt]
-        )
-        
-        return [enabled, input_prompt, enhanced_prompt, temperature, top_p, max_length]
-
-    def process(self, p, enabled, input_prompt, enhanced_prompt, temperature, top_p, max_length):
-        if not enabled:
-            return
-            
-        if enhanced_prompt and p.prompt:
-            # Replace the original prompt with the enhanced one
-            p.prompt = enhanced_prompt
-            print(f"TIPO: Prompt enhanced to: {p.prompt}")
-
-# Add the extension to the WebUI
-def on_ui_tabs():
-    with gr.Blocks(analytics_enabled=False) as tipo_interface:
-        with gr.Row():
-            gr.Markdown("# TIPO Text Generator")
-        
-        with gr.Row():
-            with gr.Column():
-                prompt_input = gr.Textbox(label="Input Prompt", lines=3, placeholder="Enter your prompt here...")
-                with gr.Row():
-                    temperature = gr.Slider(minimum=0.1, maximum=2.0, step=0.1, label="Temperature", value=0.7)
-                    top_p = gr.Slider(minimum=0.1, maximum=1.0, step=0.05, label="Top P", value=0.9)
-                
-                max_length = gr.Slider(minimum=50, maximum=500, step=10, label="Max Length", value=200)
-                generate_btn = gr.Button(value="Generate Text")
-            
-            with gr.Column():
-                output_text = gr.Textbox(label="Generated Text", lines=10)
-                copy_to_prompt = gr.Button(value="Copy to Prompt")
-        
-        def generate_text(prompt, max_len, temp, p):
+        def generate_enhanced_prompt(prompt):
             if not prompt:
                 return "Please provide an input prompt"
             
-            # Make sure the model is loaded
-            if not text_generator.model_loaded:
-                text_generator.load_model()
-                
-            enhanced = text_generator.generate_text(
-                prompt=prompt,
-                max_length=max_len,
-                temperature=temp,
-                top_p=p
-            )
-            
+            enhanced = text_generator.generate_text(prompt=prompt)
             return enhanced
         
-        generate_btn.click(
-            fn=generate_text,
-            inputs=[prompt_input, max_length, temperature, top_p],
-            outputs=[output_text]
+        generate_button.click(
+            fn=generate_enhanced_prompt,
+            inputs=[input_prompt],
+            outputs=[enhanced_prompt]
         )
         
-        # This function would interact with the txt2img or img2img tabs
-        def copy_to_txt2img():
-            # This would need JavaScript integration to work with the main UI
+        return [enabled, input_prompt, enhanced_prompt]
+
+    def process(self, p, enabled, input_prompt, enhanced_prompt):
+        if not enabled or not enhanced_prompt:
             return
         
-        copy_to_prompt.click(fn=copy_to_txt2img)
-    
-    return [(tipo_interface, "TIPO Generator", "tipo_generator")]
-
-# Register the callbacks
-script_callbacks.on_ui_tabs(on_ui_tabs)
+        # Replace the original prompt with the enhanced one
+        p.prompt = enhanced_prompt
+        print(f"TIPO: Prompt enhanced to: {p.prompt}")
 
 # API endpoints for the TIPO text generator
 def setup_api(app: FastAPI):
