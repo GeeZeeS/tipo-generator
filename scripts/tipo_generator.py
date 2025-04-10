@@ -25,12 +25,13 @@ class TIPOTextGenerator:
         self.pipe = None
         self.model_loaded = False
         self.model_name = "KBlueLeaf/TIPO-200M-ft2"
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
     
     def load_model(self):
         if not self.model_loaded:
             try:
-                print(f"Loading TIPO model: {self.model_name}")
-                self.pipe = pipeline("text-generation", model=self.model_name)
+                print(f"Loading TIPO model: {self.model_name} on device: {self.device}")
+                self.pipe = pipeline("text-generation", model=self.model_name, device=self.device)
                 self.model_loaded = True
                 print("TIPO model loaded successfully!")
                 return True
@@ -44,6 +45,7 @@ class TIPOTextGenerator:
             return "Failed to load the model."
         
         try:
+            # Ensure all processing stays on the same device
             outputs = self.pipe(
                 prompt,
                 max_length=max_length,
