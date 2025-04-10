@@ -3,21 +3,26 @@ import modules.scripts as scripts
 from modules import script_callbacks
 from modules.processing import process_images, Processed
 from modules.shared import opts, cmd_opts, state
-import torch
-from transformers import pipeline
 import os
 import sys
 import json
 from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
 
+# Force CPU-only mode
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 # Check if the required libraries are installed
 try:
+    import torch
+    torch.set_num_threads(4)  # Limit CPU threads to avoid memory issues
     from transformers import pipeline
 except ImportError:
-    print("Transformers library not found. Installing...")
+    print("Required libraries not found. Installing...")
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers"])
+    import torch
+    torch.set_num_threads(4)
     from transformers import pipeline
 
 class TIPOTextGenerator:
@@ -25,19 +30,46 @@ class TIPOTextGenerator:
         self.pipe = None
         self.model_loaded = False
         self.model_name = "KBlueLeaf/TIPO-200M-ft2"
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    
+        
     def load_model(self):
         if not self.model_loaded:
             try:
-                print(f"Loading TIPO model: {self.model_name} on device: {self.device}")
-                self.pipe = pipeline("text-generation", model=self.model_name, device=self.device)
+                print(f"Loading TIPO model: {self.model_name} on CPU")
+                # Load in 8-bit mode to reduce memory usage
+                self.pipe = pipeline(
+                    "text-generation", 
+                    model=self.model_name, 
+                    device="cpu",
+                    model_kwargs={"load_in_8bit": True}
+                )
                 self.model_loaded = True
-                print("TIPO model loaded successfully!")
+                print("TIPO model loaded successfully on CPU!")
                 return True
             except Exception as e:
                 print(f"Error loading model: {e}")
-                return False
+                # Try alternate loading method if first fails
+                try:
+                    from transformers import AutoModelForCausalLM, AutoTokenizer
+                    print("Trying alternate loading method...")
+                    tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                    model = AutoModelForCausalLM.from_pretrained(
+                        self.model_name,
+                        device_map="auto",
+                        torch_dtype=torch.float32,
+                        low_cpu_mem_usage=True
+                    )
+                    self.pipe = pipeline(
+                        "text-generation",
+                        model=model,
+                        tokenizer=tokenizer,
+                        device="cpu"
+                    )
+                    self.model_loaded = True
+                    print("TIPO model loaded successfully with alternate method!")
+                    return True
+                except Exception as e2:
+                    print(f"Error with alternate loading method: {e2}")
+                    return False
         return True
     
     def generate_text(self, prompt, max_length=200, temperature=0.7, top_p=0.9, num_return_sequences=1):
@@ -45,20 +77,24 @@ class TIPOTextGenerator:
             return "Failed to load the model."
         
         try:
-            # Ensure all processing stays on the same device
-            outputs = self.pipe(
-                prompt,
-                max_length=max_length,
-                temperature=temperature,
-                top_p=top_p,
-                num_return_sequences=num_return_sequences,
-                do_sample=True
-            )
+            # Make sure we're using CPU for inference
+            with torch.no_grad():
+                outputs = self.pipe(
+                    prompt,
+                    max_length=max_length,
+                    temperature=temperature,
+                    top_p=top_p,
+                    num_return_sequences=num_return_sequences,
+                    do_sample=True
+                )
             
             generated_texts = [output['generated_text'] for output in outputs]
             return generated_texts[0] if num_return_sequences == 1 else generated_texts
         
         except Exception as e:
+            print(f"Generation error: {e}")
+            import traceback
+            traceback.print_exc()
             return f"Error generating text: {e}"
 
 # Global instance of the text generator
